@@ -1,0 +1,215 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+``` {r libraries, echo=FALSE, include=FALSE, message= FALSE, warning = FALSE}
+x <- c("tidyverse","tidyselect","lubridate", "rgdal", "rgeos", "dplyr", "tidyr","Rcpp","sp", "tmap","foreign","tigris","httr","broom","maps","sf","scales")
+
+lapply(x, library, character.only = TRUE) # load the required packages
+
+set_date <- as.Date(Sys.Date(), format = "%m/%d/%Y")
+
+```
+
+---
+title: "NYC Shooting Incident Analysis using Geospatial Maps and Seasonal Modeling"
+author: "Blake Tagget"
+date: "10/1/2021"
+---
+
+```{r setup, echo=FALSE, message= FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height=6, fig.width=10)
+```
+
+# Report Overview
+
+This report is an introduction to shooting incidents in NYC and it exists because it was required. I would not have chosen this data set because it's area of concern involves real people in an area of real concern. The assignment was to pull some data and make a reproducible report with some charts and a model. So that's what this is. Enjoy!
+
+Since this is neither a statistics course nor a sociology course, let's focus on seeing what neighborhood has the highest number of shooting victims and if there is an annual trend over the last few years. For the model we will quickly attempt to see if there is any seasonality in our incident occurrence. 
+
+_Disclaimers: - Since this project / report will live publicly on github and is for a course targeted at getting us to learn R and make reproducible reports as well as be thoughtful of communication, I am equally attempting to share the technical aspects of what makes this data analysis work as well as articulate interesting trends I see in the data. Finally, this only my second R file - so let's have some fun!_
+
+## Geographical Analysis
+
+### Gathering Some Data
+
+There are two data sets we will download from the public internet: 
+Historic NYC shooting data and NYC Geospatial polygon data
+
+The first is the required historical shooting data set named "NYPD Shooting Incident Data (Historic)Public Safety." It has all the victims of shootings in NYC going back to 2006. You can get more information about it here: 
+https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8
+
+The second data set will allow use to create our geospatial graphs which draw boundaries for each neighborhood. While it's in a GeoJSON format for download, we quickly convert this to a Special Features object which can be manipulated in the same was as a usual data.frame. You can take a look at what the borough boundaries and neighborhoods in NYC are here: 
+https://data.beta.nyc/dataset/0ff93d2d-90ba-457c-9f7e-39e47bf2ac5f/resource/35dd04fb-81b3-479b-a074-a27a37888ce7 
+
+Using these two data sets together, we will be able to graph interesting shooting metrics about each neighborhood. Fun fact, while we will use the Longitude and Latitude in the shooting data set, we will not leverage the _BORO_ column as it has inconsistencies for 2020 (at least).
+
+```{r data_import, echo=FALSE,  message= FALSE, warning = FALSE}
+url_start <- ""
+url_links <- c("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+urls <- str_c(url_start,url_links)
+shooting_data <- read_csv(urls[1]) %>% 
+  mutate(OCCUR_DATE=mdy(OCCUR_DATE),OCCUR_YR=year(OCCUR_DATE))
+  
+shooting_data_trimmed <- shooting_data %>%
+  dplyr::select(OCCUR_YR,OCCUR_DATE,OCCUR_TIME,VIC_AGE_GROUP,VIC_SEX,VIC_RACE,Latitude,Longitude)
+shooting_data_trimmed <- tibble::rowid_to_column(shooting_data_trimmed, "rowID")
+
+r <- GET('https://data.beta.nyc/dataset/0ff93d2d-90ba-457c-9f7e-39e47bf2ac5f/resource/35dd04fb-81b3-479b-a074-a27a37888ce7/download/d085e2f8d0b54d4590b1e7d1f35594c1pediacitiesnycneighborhoods.geojson')
+nyc_neighborhoods <- readOGR(content(r,'text'), 'OGRGeoJSON', verbose = F)
+
+nyc_neighborhoods_df <- tidy(nyc_neighborhoods)
+
+nyc_neighborhoods_sf <- st_as_sf(nyc_neighborhoods)
+nyc_neighborhoods_sf <- tibble::rowid_to_column(nyc_neighborhoods_sf, "neighborhood_code")
+
+shooting_sf <- st_as_sf(shooting_data, coords = c("Longitude","Latitude"),crs= st_crs(nyc_neighborhoods_sf))
+shooting_trimmed_sf <- st_as_sf(shooting_data_trimmed, coords = c("Longitude","Latitude"),crs= st_crs(nyc_neighborhoods_sf))
+
+join_sf = st_join(nyc_neighborhoods_sf,shooting_trimmed_sf,join=st_intersects,left=TRUE)
+
+```
+
+### High Level Analysis
+
+Let's start off by looking at the entire shooting data set, count the total victims in each neighborhood, and produce a heat map to see if any particular neighborhood stands out. For visualization purposes, I have colored the neighborhoods without victims in gray and placed the shooting density on a scale from white (low victim count) to dark red (high victim count).
+
+```{r transform_1, echo=FALSE,  message= FALSE, warning = FALSE}
+trimmed_join_1 <- join_sf %>%
+  filter(!is.na(rowID)) %>% 
+  st_drop_geometry() 
+
+count_df <- dplyr::count(trimmed_join_1,neighborhood, name="Total_Victims")
+
+join_sf_1 <- nyc_neighborhoods_sf %>%
+  left_join(count_df)
+
+plot_transform_1 <- ggplot() +
+  geom_sf(data=nyc_neighborhoods_sf) +
+  geom_sf(data=join_sf_1, aes(fill=Total_Victims)) +
+  theme_void() +
+  scale_fill_gradient2(high="darkred",na.value = 'darkgray') +
+  ggtitle("NYC Shooting Victim Density by Neighborhood (all)")
+
+plot_transform_1
+```
+
+```{r find_incites, echo=FALSE,  message= FALSE, warning = FALSE}
+sorted_sf <- arrange(join_sf_1,desc(Total_Victims))
+
+total_shots <- sum(sorted_sf$Total_Victims,na.rm=T)
+first_yr <- min(join_sf$OCCUR_YR,na.rm=T)
+last_yr <- max(join_sf$OCCUR_YR,na.rm=T)
+neighborhood <- sorted_sf$neighborhood[1]
+shot_count <- sorted_sf$Total_Victims[1]
+```
+
+In summary, there are a lot of victims of shootings in NYC (`r format(total_shots, digits=0, big.mark=",")` between `r first_yr` and `r last_yr`). The high level analysis here is that the neighborhood of `r neighborhood` has the most shooting victims with a total of `r format(shot_count, digits=0, big.mark=",")` victims in that time frame.
+
+### Annual Trend Analysis
+
+Now let's look at the past few years and see if we can spot a trend of some sort for total victims by neighborhood by year. 
+
+_If you're Kniting this yourself, you should be able to enter in a number between 1 and `r last_yr-first_yr` into the numberOfYears variable and produce all the graphs in order. _
+
+```{r transform_2, echo=FALSE,  message= FALSE, warning = FALSE}
+numberOfYears <- 4
+
+trimmed_join_2 <- join_sf %>%
+  filter(!is.na(rowID)) %>% 
+  st_drop_geometry() 
+
+count_df_2 <- dplyr::count(trimmed_join_2,neighborhood,OCCUR_YR)
+
+max_range <- max(count_df_2$n,na.rm = T)
+
+pivot_df <-  count_df_2 %>%
+    pivot_wider(names_from=OCCUR_YR, values_from = n)
+
+join_sf_2 <- nyc_neighborhoods_sf %>%
+  left_join(pivot_df)
+
+for (i in seq.int(last_yr,last_yr-numberOfYears,by=-1)) {
+  
+  column <- format(i)
+  
+  filter_sf_2 <- join_sf_2 %>%
+    select(neighborhood,column) %>%
+    rename(Victim_Count = column)
+  
+  plot_transform_2 <- ggplot() +
+  geom_sf(data=nyc_neighborhoods_sf) +
+  geom_sf(data=filter_sf_2, aes(fill=Victim_Count)) +
+  theme_void() +
+  scale_fill_gradient2(high="darkred",na.value = 'darkgray',limits=c(0,max_range)) +
+  ggtitle(sprintf("NYC Shooting Victim Density by Neighborhood (%s)",column)) 
+
+  print(plot_transform_2)
+}
+```
+
+### Geospatial Trend Conclusion
+
+As you can see, the same neighborhoods show up with high victim rates and the total number of victims is variable each year. You'll want to keep in mind that we always need to question how these incidents are reported. The data footnotes explain that for a shooting to count as an incident, there must be a wounded victim.
+
+If you look closely at the color scale for each map, you'll notice that I have ensured they are consistent between each map so that we can compare both year over year and each neighborhood in the year. 
+
+I encourage you to play around with it yourself and change the number of years if you can.  
+\newpage
+
+## Modelling Seasonality
+
+For the model, we will use the month as a proxy for season. Let's see if there is a relationship between the number of shootings victims and the month they occurred in. Again, this is not a statistics course, so we will not be doing any statistical tests. Much like the previous section, this will be a visual exercise only.
+
+Below you'll see a graph with a point for each month at the total number of victims in that month. 
+
+```{r model, echo=FALSE,  message= FALSE, warning = FALSE}
+
+model_data <- shooting_data %>%
+  mutate(OCCUR_MONTH = month(OCCUR_DATE))  %>%
+  select(OCCUR_YR,OCCUR_MONTH,INCIDENT_KEY)
+
+month_count <- dplyr::count(model_data,OCCUR_YR,OCCUR_MONTH, name="Victims_per_Month")
+
+model_data_gb_2 <- setNames(aggregate(month_count$Victims_per_Month,list(month_count$OCCUR_MONTH),FUN=mean), c("Month","Average")) %>%
+  mutate(Mo2 = Month^2) %>%
+  mutate(Mo3 = Month^3) %>%
+  mutate(Mo4 = Month^4)
+
+mod <- lm(Average ~ Month + Mo2 + Mo3, data = model_data_gb_2)  
+
+model_data_2 <- mutate(model_data_gb_2,pred=predict(mod))
+
+ggplot() +
+  geom_point(data=month_count,aes(x=OCCUR_MONTH, y=Victims_per_Month), color="blue") +
+  geom_line(data=model_data_2,aes(x=Month, y=pred), color="red") +
+  theme_bw() +
+  ggtitle(sprintf("NYC Shooting Victims per Month")) 
+  
+
+```
+
+### Model Conclusions
+
+Here we can see two things. 
+1. There is likely some seasonality in the number of shooting victims in aggregate
+2. We should summarize by incident as the volume of victims per incident could be skewing our results.
+
+### Bias
+
+Bias in this data set could stem from the socioeconomic status of the particular neighborhoods as well as the sub-cultural and social institutions which may exist. These terms are very loaded and difficult to pinpoint. There is much we could do (assuming we have the data) to normalize our model in an effort to mitigate such bias. For example, if an area has 100 shootings in a month and another has 10, we should look to see if the first one is 10x larger in population than the second. Finally, referring back to #2 above, our results might be skewed if there are an out-sized number of victims per incident in any particular incident.
+
+### Final Thought
+
+Other than highlighting what neighborhood has the highest victims, any deeper analysis into why this particular neighborhood is a hot spot (so to say) should account for population density, socioeconomic status, and/or land area. Shooting victims/incidents could be higher in lower income or gang neighborhoods and/or higher in high population areas. This topic is very complex and nuanced and any fair representation should be as thorough as possible.
+
+Thanks for checking out my project!
+
+
+\newpage
+```{r session_info, echo=FALSE,  message= FALSE, warning = FALSE}
+sessioninfo::session_info()
+```
+
+
